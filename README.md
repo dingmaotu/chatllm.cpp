@@ -11,7 +11,7 @@ pure C++ implementation based on [@ggerganov](https://github.com/ggerganov)'s [g
     * [x] All LlaMA-1 models
     * [x] LlaMA-2: [Chat-7B](https://huggingface.co/meta-llama/Llama-2-7b-chat-hf), etc
     * [x] CodeLlaMA: [Instruct-7B](https://huggingface.co/codellama/CodeLlama-7b-Instruct-hf)
-    * [x] DeepSeek: [Chat-7B](https://huggingface.co/deepseek-ai/deepseek-llm-7b-chat), [Coder-7B](https://huggingface.co/deepseek-ai/deepseek-coder-6.7b-instruct) 🔥
+    * [x] DeepSeek: [Chat-7B](https://huggingface.co/deepseek-ai/deepseek-llm-7b-chat), [Coder-6.7B](https://huggingface.co/deepseek-ai/deepseek-coder-6.7b-instruct) 🔥
     * [x] Yi: [Chat-6B](https://huggingface.co/01-ai/Yi-6B-Chat), [Chat-34B](https://huggingface.co/01-ai/Yi-34B-Chat)
     * [x] WizardLM: [LM 7B](https://huggingface.co/WizardLM/WizardLM-7B-V1.0), [LM 13B](https://huggingface.co/WizardLM/WizardLM-13B-V1.2), [Coder Python-7B](https://huggingface.co/WizardLM/WizardCoder-Python-7B-V1.0)
     * [x] TigerBot: [Chat-7B](https://huggingface.co/TigerResearch/tigerbot-7b-chat), [Chat-13B](https://huggingface.co/TigerResearch/tigerbot-13b-chat-v5)
@@ -40,7 +40,12 @@ pure C++ implementation based on [@ggerganov](https://github.com/ggerganov)'s [g
 
     * [x] Mixtral: [Instruct-8x7B](https://huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1) 🔥
 
-        Caution: Implementation of sliding-window attention is *naive*. 💣
+        Two implementations of sliding-window attention (see `SlidingWindowAttentionImpl`):
+
+        - Full cache: more RAM is needed (**default**).
+        - Ring cache (i.e. rolling cache): less RAM, but current implementation is *naive* (slow). 💣
+
+    * [x] NeuralBeagle14: [7B](https://huggingface.co/mlabonne/NeuralBeagle14-7B)
 
 * Phi (`PhiForCausalLM`)
     * [x] [Phi-2](https://huggingface.co/microsoft/phi-2/tree/eb8bbd1d37d258ea74fb082c53346d33056a83d4) 🔥
@@ -169,3 +174,8 @@ Run `./build/bin/main -h` to explore more options!
 * This project is started as refactoring of [ChatGLM.cpp](https://github.com/li-plus/chatglm.cpp), without which, this project could not be possible.
 
 * Thank those who have released their the model sources and checkpoints.
+
+## Note
+
+This project is my hobby project to learn DL & GGML, and under active development. PRs of features won't
+be accepted, while PRs for bug fixes are warmly welcome.

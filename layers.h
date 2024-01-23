@@ -34,7 +34,7 @@ namespace chatllm
             CHATLLM_THROW << "forward(ForwardContext *ctx, ggml_tensor *input, int n_past): not implemented";
             return NULL;
         }
-        virtual void set_ctx(int n_ctx) const { }
+        virtual void set_ctx(int n_ctx) { }
         virtual void shift_cache(int shift, int total) { }
 
         virtual void set_prec(ggml_prec prec)
@@ -61,8 +61,14 @@ namespace chatllm
     public:
         Identity() {}
         Identity(InitContext *ctx, int a) {}
+        Identity(InitContext *ctx, int a, int b) {}
 
         ggml_tensor *forward(ForwardContext *ctx, ggml_tensor *input) override
+        {
+            return input;
+        }
+
+        ggml_tensor *forward(ForwardContext *ctx, ggml_tensor *input, int n_past) override
         {
             return input;
         }
@@ -220,7 +226,7 @@ namespace chatllm
         using Block::forward;
         ggml_tensor *forward(ForwardContext *ctx, ggml_tensor *hidden_states, int n_past) override;
 
-        void set_ctx(int n_ctx) const override { n_ctx = n_ctx; };
+        void set_ctx(int n_ctx) override { this->n_ctx = n_ctx; };
         void shift_cache(int shift, int total) override
         {
             shift_pending = ShiftPending(shift, total);
@@ -260,7 +266,7 @@ namespace chatllm
         using Block::forward;
         virtual ggml_tensor *forward(ForwardContext *ctx, ggml_tensor *hidden_states, int n_past) override;
 
-        void set_ctx(int n_ctx) const override { attention.set_ctx(n_ctx); };
+        void set_ctx(int n_ctx) override { attention.set_ctx(n_ctx); };
 
         int64_t get_param_num(bool effective_only) const override
         {
@@ -527,14 +533,15 @@ namespace chatllm
     void fill_pos_vector(ggml_tensor *pos, int n_past, int qlen);
 
     // TODO: Optimize this !!! (after ggml support matrix with ring buffer?)
+    // qlen must be 1.
     // This is just a proof of concept.
-    template <int cache_len> class BaseSlidingWindowAttention : public BaseAttention
+    template <int sliding_window_len> class BaseSlidingWindowAttentionRingCache : public BaseAttention
     {
     public:
-        BaseSlidingWindowAttention(InitContext *ctx, int hidden_size, int num_attention_heads, int num_kv_heads, int max_length, bool qkv_bias, bool o_bias)
-            : BaseAttention(ctx, hidden_size, num_attention_heads, num_kv_heads, max_length, qkv_bias, o_bias, GGML_TYPE_F16, cache_len),
+        BaseSlidingWindowAttentionRingCache(InitContext *ctx, int hidden_size, int num_attention_heads, int num_kv_heads, int max_length, bool qkv_bias, bool o_bias)
+            : BaseAttention(ctx, hidden_size, num_attention_heads, num_kv_heads, max_length, qkv_bias, o_bias, GGML_TYPE_F16, sliding_window_len),
               cache_offset(0),
-              indices(ggml_new_tensor_1d(ctx->gctx.get(), GGML_TYPE_I32, cache_len))
+              indices(ggml_new_tensor_1d(ctx->gctx.get(), GGML_TYPE_I32, sliding_window_len))
         {
             indices->data = new char[ggml_nbytes(indices)];
         }
@@ -559,14 +566,14 @@ namespace chatllm
             const int write_offset = (cache_offset + n_past) % cache_length;
             const int empty = cache_length - write_offset;
             const int write_len = empty >= qlen ? qlen : empty;
-            const int remain = qlen > write_len ? qlen - write_len : 0;
+            const int remain = qlen - write_len;
 
             {
                 struct ggml_tensor * k_cache_view = ggml_view_1d(ctx->gctx.get(), k_cache, write_len * kv_hidden_size,
                         ggml_element_size(k_cache) * kv_hidden_size * write_offset);
 
                 struct ggml_tensor * v_cache_view = ggml_view_1d(ctx->gctx.get(), v_cache, write_len * kv_hidden_size,
-                        ggml_element_size(k_cache) * kv_hidden_size * write_offset);
+                        ggml_element_size(v_cache) * kv_hidden_size * write_offset);
 
                 struct ggml_tensor * k_view = ggml_view_1d(ctx->gctx.get(), k, write_len * kv_hidden_size, 0);
                 struct ggml_tensor * v_view = ggml_view_1d(ctx->gctx.get(), v, write_len * kv_hidden_size, 0);
@@ -587,7 +594,7 @@ namespace chatllm
                         write_len * kv_hidden_size * ggml_element_size(k));
 
                 struct ggml_tensor * v_view = ggml_view_1d(ctx->gctx.get(), v, remain * kv_hidden_size,
-                        write_len * kv_hidden_size * ggml_element_size(k));
+                        write_len * kv_hidden_size * ggml_element_size(v));
 
                 ggml_build_forward_expand(ctx->gf, ggml_cpy(ctx->gctx.get(), k_view, k_cache_view));
                 ggml_build_forward_expand(ctx->gf, ggml_cpy(ctx->gctx.get(), v_view, v_cache_view));
@@ -612,13 +619,11 @@ namespace chatllm
 
             const int total = n_past + qlen > cache_length ? cache_length : n_past + qlen;
 
-            ggml_tensor *key_layer = nullptr;
             ggml_tensor *indices_view = ggml_view_1d(ctx->gctx.get(), indices, total, 0);
-            ggml_tensor *k_cache_view = ggml_view_2d(ctx->gctx.get(), k_cache, kv_hidden_size, cache_len,
+            ggml_tensor *k_cache_view = ggml_view_2d(ctx->gctx.get(), k_cache, kv_hidden_size, cache_length,
                                             kv_hidden_size * ggml_element_size(k_cache), 0);
-            ggml_tensor *k_cache_norm = ggml_get_rows(ctx->gctx.get(), k_cache_view, indices_view);
+            ggml_tensor *key_layer = ggml_get_rows(ctx->gctx.get(), k_cache_view, indices_view);
 
-            key_layer = ggml_view_1d(ctx->gctx.get(), k_cache_norm, total * kv_hidden_size, 0);
             key_layer = ggml_reshape_3d(ctx->gctx.get(), key_layer, head_size, num_kv_heads, total);  // [qlen, heads, head_size]
             key_layer = ggml_permute(ctx->gctx.get(), key_layer, 0, 2, 1, 3);                         // [heads, qlen, head_size]
 
@@ -634,13 +639,11 @@ namespace chatllm
 
             const int total = n_past + qlen > cache_length ? cache_length : n_past + qlen;
 
-            ggml_tensor *value_layer = nullptr;
             ggml_tensor *indices_view = ggml_view_1d(ctx->gctx.get(), indices, total, 0);
-            ggml_tensor *v_cache_view = ggml_view_2d(ctx->gctx.get(), v_cache, kv_hidden_size, cache_len,
-                                            kv_hidden_size * ggml_element_size(k_cache), 0);
-            ggml_tensor *v_cache_norm = ggml_get_rows(ctx->gctx.get(), v_cache_view, indices_view);
+            ggml_tensor *v_cache_view = ggml_view_2d(ctx->gctx.get(), v_cache, kv_hidden_size, cache_length,
+                                            kv_hidden_size * ggml_element_size(v_cache), 0);
+            ggml_tensor *value_layer  = ggml_get_rows(ctx->gctx.get(), v_cache_view, indices_view);
 
-            value_layer = ggml_view_1d(ctx->gctx.get(), v_cache_norm, total * kv_hidden_size, 0);
             value_layer = ggml_reshape_3d(ctx->gctx.get(), value_layer, head_size, num_kv_heads, total);  // [qlen, heads, head_size]
             value_layer = ggml_permute(ctx->gctx.get(), value_layer, 1, 2, 0, 3);                         // [heads, head_size, klen]
             value_layer = ggml_cont(ctx->gctx.get(), value_layer);
@@ -649,6 +652,65 @@ namespace chatllm
         }
 
         int cache_offset;
+        ggml_tensor *indices;
+    };
+
+    template <int sliding_window_len> class BaseSlidingWindowAttentionFullCache : public BaseAttention
+    {
+    public:
+        BaseSlidingWindowAttentionFullCache(InitContext *ctx, int hidden_size, int num_attention_heads, int num_kv_heads, int max_length, bool qkv_bias, bool o_bias)
+            : BaseAttention(ctx, hidden_size, num_attention_heads, num_kv_heads, max_length, qkv_bias, o_bias, GGML_TYPE_F16, max_length),
+              indices(ggml_new_tensor_1d(ctx->gctx.get(), GGML_TYPE_I32, 1)) // to ensure number of tensors are the same
+        {
+        }
+
+    protected:
+
+        // output: [heads, qlen, head_size]
+        ggml_tensor *get_k_from_cache(ForwardContext *ctx, const int hidden_size, const int n_past, const int qlen) override
+        {
+            const int head_size = hidden_size / num_attention_heads;
+            const int repeat = num_attention_heads / num_kv_heads;
+            const int kv_hidden_size = hidden_size / repeat;
+            // TODO: It seems that qlen must be 1.
+            int64_t len = n_past + qlen;
+            int64_t offset = 0;
+            if (len > sliding_window_len)
+            {
+                offset = len - sliding_window_len;
+                len = sliding_window_len;
+            }
+
+            ggml_tensor *key_layer = nullptr;
+
+            key_layer = ggml_view_1d(ctx->gctx.get(), k_cache, len * kv_hidden_size, offset * kv_hidden_size * ggml_element_size(k_cache));
+            key_layer = ggml_reshape_3d(ctx->gctx.get(), key_layer, head_size, num_kv_heads, len);  // [qlen, heads, head_size]
+            key_layer = ggml_permute(ctx->gctx.get(), key_layer, 0, 2, 1, 3);                       // [heads, qlen, head_size]
+
+            return key_layer;
+        }
+
+        // output: [heads, head_size, klen]
+        ggml_tensor *get_v_from_cache(ForwardContext *ctx, const int hidden_size, const int n_past, const int qlen) override
+        {
+            const int head_size = hidden_size / num_attention_heads;
+            int64_t len = n_past + qlen;
+            int64_t offset = 0;
+            if (len > sliding_window_len)
+            {
+                offset = len - sliding_window_len;
+                len = sliding_window_len;
+            }
+
+            ggml_tensor * value_layer = ggml_view_3d(ctx->gctx.get(),
+                            v_cache,
+                            len, head_size, num_kv_heads,
+                            cache_length * ggml_element_size(v_cache),
+                            cache_length * ggml_element_size(v_cache) * head_size,
+                            offset * ggml_element_size(v_cache)); // [heads, head_size, klen]
+            return value_layer;
+        }
+
         ggml_tensor *indices;
     };
 
@@ -1016,14 +1078,16 @@ namespace chatllm
         {}
     };
 
-    template <int sliding_window_len> class MistralSelfAttention : public BaseSelfAttention<BaseSlidingWindowAttention<sliding_window_len>>
+    #define SlidingWindowAttentionImpl BaseSlidingWindowAttentionFullCache
+
+    template <int sliding_window_len> class MistralSelfAttention : public BaseSelfAttention<SlidingWindowAttentionImpl<sliding_window_len>>
     {
     public:
         MistralSelfAttention(InitContext *ctx, int hidden_size, int num_attention_heads, int max_length)
-            : BaseSelfAttention<BaseSlidingWindowAttention<sliding_window_len>>(ctx, hidden_size, num_attention_heads, max_length, false, false) {}
+            : BaseSelfAttention<SlidingWindowAttentionImpl<sliding_window_len>>(ctx, hidden_size, num_attention_heads, max_length, false, false) {}
 
         MistralSelfAttention(InitContext *ctx, int hidden_size, int num_attention_heads, int num_kv_heads, int max_length)
-            : BaseSelfAttention<BaseSlidingWindowAttention<sliding_window_len>>(ctx, hidden_size, num_attention_heads, num_kv_heads, max_length, false, false) {}
+            : BaseSelfAttention<SlidingWindowAttentionImpl<sliding_window_len>>(ctx, hidden_size, num_attention_heads, num_kv_heads, max_length, false, false) {}
     };
 
     template<int num_local_experts, int num_experts_per_tok, int sliding_window_len> class MixtralBlock : public LMBlock1<RMSNorm, MistralSelfAttention<sliding_window_len>, RMSNorm,
